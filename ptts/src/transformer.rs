@@ -178,6 +178,13 @@ impl<Q: BackendQ> StreamingMultiheadAttention<Q> {
 
         let (k, v) = state.complete_kv(&k, &v)?;
 
+        // `sdpa_decode` is fused and returns only the output, so the weights a
+        // word-timestamp aligner needs have to be recomputed. Off unless
+        // PTTS_TS_HEADS names a head on this layer.
+        if crate::attn_capture::enabled() {
+            crate::attn_capture::capture(&q, &k, inv_sqrt_d)?;
+        }
+
         let x = if t == 1 {
             q.sdpa_decode(&k, &v, mask, inv_sqrt_d)?
         } else {
@@ -743,7 +750,12 @@ impl<Q: BackendQ> StreamingTransformer<Q> {
             .unwrap_or(0);
         let rope =
             RotaryEmbedding::new(self.head_dim, offset, seq_len, self.max_period, x.device())?;
-        for (layer, layer_state) in self.layers.iter().zip(state.layer_states.iter_mut()) {
+        for (i, (layer, layer_state)) in
+            self.layers.iter().zip(state.layer_states.iter_mut()).enumerate()
+        {
+            // Which layer's attention `attn_capture` is about to see. Set per layer rather
+            // than passed down, so the capture costs nothing when it is switched off.
+            crate::attn_capture::set_layer(i);
             x = layer.forward(&x, &rope, layer_state, mask.as_ref(), None)?;
         }
         Ok(x)
@@ -768,7 +780,10 @@ impl<Q: BackendQ> StreamingTransformer<Q> {
         step: &DeviceStep<Q::T, Q::B>,
     ) -> Result<Tensor<Q::T, Q::B>> {
         let mut x = x.clone();
-        for (layer, layer_state) in self.layers.iter().zip(state.layer_states.iter_mut()) {
+        for (i, (layer, layer_state)) in
+            self.layers.iter().zip(state.layer_states.iter_mut()).enumerate()
+        {
+            crate::attn_capture::set_layer(i);
             x = layer.forward(&x, &step.rope, layer_state, None, Some(step))?;
         }
         Ok(x)

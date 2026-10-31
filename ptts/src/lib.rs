@@ -75,6 +75,8 @@
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+/// Capturing the flow LM's attention over the text, which word timestamps read.
+pub mod attn_capture;
 #[cfg(feature = "audio")]
 pub mod audio;
 #[cfg(not(target_arch = "wasm32"))]

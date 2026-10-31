@@ -380,6 +380,27 @@ impl<Q: BackendQ> FlowLM<Q> {
             FlowType::Drifting => self.flow_net.forward(t_out, None, noise)?,
             FlowType::Pointwise => noise.add(&self.flow_net.forward(t_out, None, noise)?)?,
         };
+        // Per-frame trajectory for comparing against the Python reference: the
+        // eos logit and the latent, which is what carries silence. Reading them
+        // back to the host costs a sync per frame, so it is off by default.
+        if std::env::var_os("PTTS_DEBUG_FRAMES").is_some() {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static FRAME: AtomicUsize = AtomicUsize::new(0);
+            let i = FRAME.fetch_add(1, Ordering::Relaxed);
+            // Converted to f32 the way the mimi path does, since the backend's
+            // element type is generic and not readable as a host float.
+            let lat32: Tensor<f32, Q::B> = latent.to()?;
+            let lv: Vec<f32> = lat32.flatten_all()?.to_vec()?;
+            let eos32: Tensor<f32, Q::B> = eos_logit.to()?;
+            let ev: Vec<f32> = eos32.flatten_all()?.to_vec()?;
+            let l2 = lv.iter().map(|v| v * v).sum::<f32>().sqrt();
+            let head: Vec<String> = lv.iter().take(4).map(|v| format!("{v:.6}")).collect();
+            println!(
+                "FRAME,{i},{:.6},{l2:.6},{}",
+                ev.first().copied().unwrap_or(0.0),
+                head.join(",")
+            );
+        }
         Ok((latent.reshape((b, 1, self.ldim))?, eos_logit))
     }
 
