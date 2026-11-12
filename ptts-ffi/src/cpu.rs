@@ -9,6 +9,7 @@ use crate::{PTTS_UNIT_CPU, PttsResult};
 use ptts::checkpoint::read_config;
 use ptts::preprocess::Normalize;
 use ptts::synth::{DeviceKind, Quant, SpeechOptions, Synth, SynthBuilder};
+use std::ffi::CString;
 use std::path::Path;
 
 /// Weight files tried in order, with the format each loads as.
@@ -23,9 +24,10 @@ pub struct Engine {
     /// Left `None`, the builder's defaults.
     temperature: Option<f32>,
     seed: Option<u64>,
-    /// Applied here rather than by `synth`, which is built with `Normalize::OFF`, so that
-    /// `set_language` can change it without a reload. `Synth` applies it first thing anyway.
-    normalize: Normalize,
+    /// Whether to report word timings for the next utterance.
+    timings: bool,
+    /// The last utterance's word timings as JSON, for `ptts_word_timings` to borrow.
+    last_timings: Option<CString>,
     /// Samples per frame, to count frames in what the stream hands back.
     frame_size: usize,
 }
@@ -47,7 +49,7 @@ impl Engine {
                 ),
             )?;
         let frame_rate = cfg.mimi.frame_rate;
-        let mut builder = SynthBuilder::new(cfg, weights, Normalize::OFF)
+        let mut builder = SynthBuilder::new(cfg, weights, normalize)
             .tokenizer_file(dir.join("tokenizer.json"))
             .device(DeviceKind::Cpu)
             .quant(quant);
@@ -62,7 +64,8 @@ impl Engine {
             voice: synth.default_voice(),
             temperature: None,
             seed: None,
-            normalize,
+            timings: false,
+            last_timings: None,
             synth,
             frame_size,
         })
@@ -84,8 +87,20 @@ impl Engine {
 
     /// Normalize text as `lang` from the next utterance on.
     pub fn set_language(&mut self, lang: &str) -> Result<(), String> {
-        self.normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+        let normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+        self.synth.set_normalization(normalize);
         Ok(())
+    }
+
+    /// Report word timings from the next utterance on.
+    pub fn set_timings(&mut self, on: bool) -> Result<(), String> {
+        self.timings = on;
+        Ok(())
+    }
+
+    /// The last utterance's word timings as JSON, or `None` if none were asked for.
+    pub fn word_timings(&self) -> Option<&CString> {
+        self.last_timings.as_ref()
     }
 
     /// Sample at `temperature`, already checked, from the next utterance on.
@@ -108,13 +123,17 @@ impl Engine {
             voice: self.voice.clone(),
             temperature: self.temperature,
             seed: self.seed,
+            timings: self.timings,
             ..Default::default()
         };
-        let text = self.normalize.apply(text);
-        let stream = self.synth.stream_with(&text, &opts).map_err(|e| e.to_string())?;
+        // The caller's text, not a normalized copy: `Synth` normalizes internally, and that is
+        // what makes the word timings point into the string the caller passed -- `$2` stays the
+        // caller's `$2` while it is read as "2 dollars".
+        self.last_timings = None;
+        let mut stream = self.synth.stream_with(text, &opts).map_err(|e| e.to_string())?;
         let (mut samples, mut ttfa) = (0, None);
         // Dropping the stream on an early return stops generation.
-        for pcm in stream {
+        for pcm in stream.by_ref() {
             let pcm = pcm.map_err(|e| e.to_string())?;
             if pcm.is_empty() {
                 continue;
@@ -124,6 +143,10 @@ impl Engine {
             if !sink(&pcm) {
                 break;
             }
+        }
+        if self.timings {
+            let json = serde_json::to_string(stream.word_timings()).map_err(|e| e.to_string())?;
+            self.last_timings = Some(CString::new(json).map_err(|e| e.to_string())?);
         }
         Ok(PttsResult {
             frames: samples.div_ceil(self.frame_size) as u32,

@@ -561,6 +561,10 @@ impl<Q: BackendQ> SynthApi for SynthOf<Q> {
         self.normalize
     }
 
+    fn set_normalization(&mut self, normalize: Normalize) {
+        self.normalize = normalize;
+    }
+
     fn device_name(&self) -> String {
         self.model.device().name()
     }
@@ -1902,6 +1906,14 @@ pub trait SynthApi: sealed::Sealed + Send + Sync {
     /// callers that drive [`SessionApi::stream_tokens`] and so tokenize
     /// themselves, and want [`Normalize::apply`] first.
     fn normalization(&self) -> Normalize;
+
+    /// Normalize later requests as `normalize` instead.
+    ///
+    /// Normalization is pure text preprocessing, read once per request, so the language of
+    /// the spoken forms changes with no reload. It also decides the text that word timings
+    /// are reported against: every text-taking method here normalizes internally, so a
+    /// caller that normalizes first instead gets offsets into its own normalized string.
+    fn set_normalization(&mut self, normalize: Normalize);
 
     /// Name of the device the model is running on, e.g. `"cpu"` or `"cuda:0"`.
     fn device_name(&self) -> String;

@@ -212,6 +212,39 @@ pub unsafe extern "C" fn ptts_set_language(h: *mut PttsHandle, lang: *const c_ch
     }
 }
 
+/// Report word timings for every `ptts_speak` from now on, or stop reporting them. They are
+/// read from the flow LM's text attention as it steps, so nothing is computed while this is
+/// off. Returns false where the engine cannot produce them -- the Core ML engine on Apple --
+/// see `ptts_last_error`; turning them off always succeeds.
+///
+/// # Safety
+/// `h` must come from `ptts_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ptts_set_timings(h: *mut PttsHandle, on: bool) -> bool {
+    let h = unsafe { &mut *h };
+    match guarded(|| h.engine.set_timings(on)) {
+        Ok(()) => true,
+        Err(e) => {
+            h.last_error = Some(c_string(&e));
+            false
+        }
+    }
+}
+
+/// The last `ptts_speak`'s word timings as a JSON array, or null when none were asked for.
+///
+/// Each entry is `{"word", "start", "end", "from", "to"}`: the word as it appears in the text
+/// that was passed, its Unicode scalar offsets into that text -- before normalization, so `$2`
+/// is still the caller's `$2` while it is read as "2 dollars" -- and the seconds from the start
+/// of the utterance at which it is spoken. Borrowed until the next `ptts_speak`.
+///
+/// # Safety
+/// `h` must come from `ptts_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ptts_word_timings(h: *const PttsHandle) -> *const c_char {
+    unsafe { (*h).engine.word_timings().map_or(std::ptr::null(), |c| c.as_ptr()) }
+}
+
 /// Sample at `temperature` from the next `ptts_speak` on: higher varies more, 0 removes the
 /// randomness. The default is the model's. Returns false for a negative, infinite or NaN
 /// temperature; see `ptts_last_error`.

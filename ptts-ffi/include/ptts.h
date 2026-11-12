@@ -41,6 +41,15 @@ bool ptts_set_voice(PttsHandle *h, const char *name);
 bool ptts_set_language(PttsHandle *h, const char *lang);
 /// The languages the model was trained for, NUL-separated like ptts_voices. Borrowed.
 const char *ptts_languages(const PttsHandle *h);
+/// Report word timings for every ptts_speak from now on, or stop reporting them. Nothing is
+/// computed while this is off. False where the engine cannot produce them (the Core ML engine
+/// on Apple); then ptts_last_error says so. Turning them off always succeeds.
+bool ptts_set_timings(PttsHandle *h, bool on);
+/// The last ptts_speak's word timings as a JSON array, or NULL when none were asked for. Each
+/// entry is {"word", "start", "end", "from", "to"}: the word as it appears in the text passed,
+/// its Unicode scalar offsets into that text before normalization, and the seconds from the
+/// start of the utterance at which it is spoken. Borrowed until the next ptts_speak.
+const char *ptts_word_timings(const PttsHandle *h);
 /// Sample at `temperature` from the next ptts_speak on: higher varies more, 0 removes the
 /// randomness. The default is the model's. False for a negative, infinite or NaN temperature.
 bool ptts_set_temperature(PttsHandle *h, float temperature);
