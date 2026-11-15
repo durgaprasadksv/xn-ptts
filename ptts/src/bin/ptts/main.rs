@@ -99,6 +99,11 @@ struct Args {
     )]
     conditions: Vec<String>,
 
+    /// Write word timings to this path as JSON. Needs a checkpoint with calibrated
+    /// `timestamp_heads` in its config.
+    #[arg(long, value_name = "PATH")]
+    timings: Option<std::path::PathBuf>,
+
     /// Replay noise from a JSON array of floats instead of sampling it, so a
     /// run can be compared against the reference implementation step for step.
     #[arg(long, help_heading = "Developer")]
@@ -224,6 +229,10 @@ fn main() -> Result<()> {
         );
     }
 
+    if args.timings.is_some() {
+        opts = opts.timings(true);
+    }
+
     tracing::info!("generating");
     let start = std::time::Instant::now();
     let stream = match args.rng_values.as_ref() {
@@ -238,9 +247,15 @@ fn main() -> Result<()> {
     let sample_rate = stream.sample_rate();
     let mut pcm = Vec::new();
     let mut first_chunk_ms = None;
-    for chunk in stream {
+    let mut stream = stream;
+    for chunk in stream.by_ref() {
         pcm.extend_from_slice(&chunk?);
         first_chunk_ms.get_or_insert_with(|| start.elapsed().as_secs_f64() * 1000.0);
+    }
+    if let Some(path) = args.timings.as_ref() {
+        let words = stream.word_timings();
+        std::fs::write(path, serde_json::to_string_pretty(&words)?)?;
+        tracing::info!(words = words.len(), path = %path.display(), "wrote word timings");
     }
 
     let elapsed = start.elapsed().as_secs_f64();

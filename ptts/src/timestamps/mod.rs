@@ -14,6 +14,9 @@ pub mod alignment;
 pub mod records;
 pub mod units;
 
+mod driver;
+
 pub use alignment::{is_voiced, WordAlignment};
+pub use driver::{Aligner, ChunkLayout};
 pub use records::{SourceWord, TextUnit, TimedWord, WordEnd, WordEvent, WordStart};
 pub use units::{lexical_word_spans, scores_by_unit, units_from_layout};

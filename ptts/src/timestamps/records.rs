@@ -67,7 +67,7 @@ impl TextUnit {
 }
 
 /// A word began being uttered.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct WordStart {
     pub text: String,
     pub word_index: usize,
@@ -76,7 +76,7 @@ pub struct WordStart {
 
 /// A word finished being uttered. Carries its start, so a consumer watching
 /// only ends still has the whole span.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct WordEnd {
     pub text: String,
     pub word_index: usize,
@@ -97,7 +97,7 @@ pub enum WordEvent {
 /// the two together, because the span is the only reliable way to know which
 /// text a timing belongs to — searching the prompt for the word can match an
 /// earlier occurrence of a short word inside a longer one.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TimedWord {
     pub word: WordEnd,
     /// Byte offsets into the prepared prompt for this word's chunk.

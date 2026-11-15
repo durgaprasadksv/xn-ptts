@@ -240,6 +240,8 @@ pub struct SpeechOptions {
     pub max_tokens_per_chunk: Option<usize>,
     /// Audio modules run over the PCM, in order, before it is handed out.
     pub post_process: Option<Vec<ModuleConfig>>,
+    /// Report when each word of the text is spoken. See [`SpeechStream::word_timings`].
+    pub timings: bool,
 }
 
 impl SpeechOptions {
@@ -272,6 +274,13 @@ impl SpeechOptions {
         self.post_process = Some(modules.into_iter().collect());
         self
     }
+
+    /// Report when each word of the text is spoken. Needs a checkpoint with calibrated
+    /// `timestamp_heads`, and a tokenizer that reports piece offsets.
+    pub fn timings(mut self, timings: bool) -> Self {
+        self.timings = timings;
+        self
+    }
 }
 
 /// Defaults applied to every request unless overridden per call.
@@ -283,6 +292,7 @@ struct Defaults {
     cfg_coef: Option<f32>,
     max_tokens_per_chunk: usize,
     post_process: Vec<ModuleConfig>,
+    timings: bool,
 }
 
 /// Merge per-request overrides onto the settings a [`SynthBuilder`] was given.
@@ -314,6 +324,9 @@ fn resolve(defaults: &Defaults, opts: &SpeechOptions) -> Result<Defaults> {
         },
         max_tokens_per_chunk: opts.max_tokens_per_chunk.unwrap_or(defaults.max_tokens_per_chunk),
         post_process: opts.post_process.clone().unwrap_or_else(|| defaults.post_process.clone()),
+        // Asking for timings per request is additive: a builder told to report them always
+        // does, and a request can turn them on for itself.
+        timings: opts.timings || defaults.timings,
     })
 }
 
@@ -423,6 +436,8 @@ impl<Q: BackendQ> SynthOf<Q> {
             post_process: settings.post_process.clone(),
             inline_decode: self.inline_decode,
             graphs: Arc::clone(&self.graphs),
+            timings: settings.timings,
+            timestamp_heads: self.cfg.timestamp_heads.clone(),
         })
     }
 
@@ -908,6 +923,11 @@ struct SessionOf<Q: BackendQ> {
     inline_decode: bool,
     /// See [`SynthOf::graphs`].
     graphs: Arc<GraphPool<Q>>,
+    /// Whether generations from this session report word timings.
+    timings: bool,
+    /// The checkpoint's calibrated attention heads, carried from its config so the generation
+    /// side does not need the config itself.
+    timestamp_heads: Option<Vec<crate::tts_model::TimestampHead>>,
 }
 
 impl<Q: BackendQ> SessionOf<Q> {
@@ -939,6 +959,46 @@ impl<Q: BackendQ> SessionOf<Q> {
     ///
     /// The single place generation is driven from: [`SynthApi::stream_with_rng`]
     /// reaches it through an ephemeral session.
+    /// The aligner for one generation, or an error saying why timings are unavailable.
+    ///
+    /// Every chunk is laid out up front rather than lazily: the tokenizer lives on this side
+    /// of the thread boundary, and a layout failure should be reported to the caller now
+    /// instead of silently losing one chunk's words mid-utterance.
+    fn build_aligner(&self, chunks: &[Chunk]) -> Result<crate::timestamps::Aligner> {
+        let heads: Vec<(usize, usize)> = match self.timestamp_heads.as_deref() {
+            Some(heads) if !heads.is_empty() => heads.iter().map(|h| (h.layer, h.head)).collect(),
+            _ => {
+                return Err(Error::unsupported(
+                    "this checkpoint has no calibrated timestamp_heads, so it cannot report \
+                     word timings",
+                ))
+            }
+        };
+        let tokenizer = match self.model.flow_lm.conditioner.tokenizer.as_ref() {
+            Some(tokenizer) => tokenizer.as_ref(),
+            None => {
+                return Err(Error::unsupported(
+                    "word timings need the tokenizer this model was loaded with",
+                ))
+            }
+        };
+        let layouts = chunks
+            .iter()
+            .map(|chunk| {
+                // The prepared prompt, not `chunk.text`: that is what was tokenized, so that
+                // is what the attention columns line up with.
+                let (prepared, _) = crate::tts_model::prepare_text_prompt(&chunk.text);
+                crate::timestamps::ChunkLayout::new(&prepared, tokenizer)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(crate::timestamps::Aligner::new(
+            heads,
+            self.prompt_len,
+            self.frame_rate,
+            layouts,
+        ))
+    }
+
     fn stream_chunks(
         &self,
         chunks: Vec<Chunk>,
@@ -972,6 +1032,16 @@ impl<Q: BackendQ> SessionOf<Q> {
                  SpeechStream first, or build a second session",
             ));
         }
+        // Built here, on the calling thread, because only this side holds the tokenizer: the
+        // generation loop runs on a worker and sees nothing but `Chunk`s. A checkpoint with no
+        // calibrated heads, or a tokenizer that cannot report piece offsets, is an error rather
+        // than silence -- a caller that asked for timings should not get empty ones.
+        let aligner = match self.timings {
+            false => None,
+            true => Some(Arc::new(std::sync::Mutex::new(self.build_aligner(&chunks)?))),
+        };
+        let for_worker = aligner.clone();
+
         let in_flight = InFlight(Arc::clone(&self.in_flight));
 
         // Each request starts from the primed state rather than re-conditioning
@@ -993,7 +1063,10 @@ impl<Q: BackendQ> SessionOf<Q> {
                 let _in_flight = in_flight;
                 let result = with_step_graph(&graphs, &base_state, &cfg_base, |graph| {
                     let (base, cfg) = (&base_state, &cfg_base);
-                    run_inline(&model, graph, chunks, base, cfg, rng, mimi_init, &pcm_tx, post)
+                    run_inline(
+                        &model, graph, chunks, base, cfg, rng, mimi_init, &pcm_tx, post,
+                        for_worker,
+                    )
                 });
                 if let Err(e) = result {
                     let _ = pcm_tx.send(Err(e));
@@ -1106,7 +1179,9 @@ impl<Q: BackendQ> SessionOf<Q> {
                 let _in_flight = in_flight;
                 let result = with_step_graph(&graphs, &base_state, &cfg_base, |graph| {
                     let (base, cfg) = (&base_state, &cfg_base);
-                    run_backbone(&model, graph, chunks, base, cfg, rng, &latent_tx, first_rx)
+                    run_backbone(
+                        &model, graph, chunks, base, cfg, rng, &latent_tx, first_rx, for_worker,
+                    )
                 });
                 if let Err(e) = result {
                     let _ = pcm_tx.send(Err(e));
@@ -1117,6 +1192,7 @@ impl<Q: BackendQ> SessionOf<Q> {
         };
 
         Ok(SpeechStream {
+            timings: aligner,
             rx: Some(pcm_rx),
             sample_rate: self.sample_rate(),
             failed: false,
@@ -1329,10 +1405,17 @@ fn run_backbone<Q: BackendQ>(
     mut rng: Box<dyn crate::flow_lm::Rng + Send>,
     latent_tx: &std::sync::mpsc::SyncSender<Frame<Q>>,
     first_decoded: std::sync::mpsc::Receiver<()>,
+    aligner: Option<Arc<std::sync::Mutex<crate::timestamps::Aligner>>>,
 ) -> Result<()> {
     // Taken after the first frame: only the stream's first audio is worth the wait.
     let mut first_decoded = Some(first_decoded);
-    for chunk in chunks.iter() {
+    for (index, chunk) in chunks.iter().enumerate() {
+        // The capture is pointed at this chunk's own text window before its first step, and
+        // drained after its last: the window moves with the chunk, and the frames in between
+        // are this chunk's.
+        if let Some(aligner) = aligner.as_ref() {
+            aligner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).begin_chunk(index);
+        }
         let mut flow =
             Flow::start(model, base_state, cfg_base, graph.as_deref_mut(), &chunk.tokens)?;
         let mut prev: Option<Tensor<Q::T, Q::B>> = None;
@@ -1357,10 +1440,17 @@ fn run_backbone<Q: BackendQ>(
             }
             prev = Some(next);
         }
+        // Drained before the boundary is announced, so this chunk's frames are aligned while
+        // they are still this chunk's -- the flow LM runs ahead, and the next chunk's capture
+        // would otherwise mix in.
+        if let Some(aligner) = aligner.as_ref() {
+            aligner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).end_chunk(index);
+        }
         if latent_tx.send(Frame::ChunkEnd).is_err() {
             return Ok(());
         }
     }
+    crate::attn_capture::stop();
     Ok(())
 }
 
@@ -1379,12 +1469,16 @@ fn run_inline<Q: BackendQ>(
     mimi_init: crate::mimi::MimiDecoderState<f32, Q::B>,
     pcm_tx: &std::sync::mpsc::SyncSender<Result<Vec<f32>>>,
     mut post: Chain,
+    aligner: Option<Arc<std::sync::Mutex<crate::timestamps::Aligner>>>,
 ) -> Result<()> {
     let mut mimi_state = mimi_init.clone();
     // The post-processing chain delays its output: its first `skip` samples are the zeros it
     // was primed with, dropped here, and the stream's last are flushed below.
     let mut skip = post.latency();
-    for chunk in chunks.iter() {
+    for (index, chunk) in chunks.iter().enumerate() {
+        if let Some(aligner) = aligner.as_ref() {
+            aligner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).begin_chunk(index);
+        }
         let mut flow =
             Flow::start(model, base_state, cfg_base, graph.as_deref_mut(), &chunk.tokens)?;
         let mut prev: Option<Tensor<Q::T, Q::B>> = None;
@@ -1416,8 +1510,15 @@ fn run_inline<Q: BackendQ>(
             }
             prev = Some(next);
         }
+        // Drained before the boundary is announced, so this chunk's frames are aligned while
+        // they are still this chunk's -- the flow LM runs ahead, and the next chunk's capture
+        // would otherwise mix in.
+        if let Some(aligner) = aligner.as_ref() {
+            aligner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).end_chunk(index);
+        }
         mimi_state = mimi_init.clone();
     }
+    crate::attn_capture::stop();
     let latency = post.latency();
     if latency > skip {
         let mut tail = vec![0.0; latency];
@@ -1451,11 +1552,30 @@ pub struct SpeechStream {
     /// decoder) on the CPU, one thread doing both inline on devices with a single shared
     /// command queue; see [`SynthOf::inline_decode`].
     workers: Option<Vec<std::thread::JoinHandle<()>>>,
+    /// Shared with the generating thread, which appends each chunk's words as that chunk
+    /// finishes. `None` when timings were not asked for.
+    timings: Option<Arc<std::sync::Mutex<crate::timestamps::Aligner>>>,
 }
 
 impl SpeechStream {
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// The words aligned so far, in order.
+    ///
+    /// A word appears once the chunk containing it has finished generating, so reading this
+    /// while iterating gives the words whose audio has already been handed out. Once the
+    /// iterator ends, this is every word. Empty when timings were not requested.
+    pub fn word_timings(&self) -> Vec<crate::timestamps::TimedWord> {
+        match self.timings.as_ref() {
+            None => Vec::new(),
+            Some(aligner) => aligner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .words()
+                .to_vec(),
+        }
     }
 
     fn join_workers(&mut self) -> bool {
@@ -1875,6 +1995,7 @@ impl SynthBuilder {
             voices: BTreeMap::new(),
             primed: Mutex::new(Recent::new()),
             defaults: Defaults {
+                timings: false,
                 voice: self.voice.clone(),
                 temperature: self.temperature,
                 seed: self.seed,
@@ -2313,6 +2434,7 @@ mod tests {
 
     fn defaults() -> Defaults {
         Defaults {
+            timings: false,
             voice: Some("alba".into()),
             temperature: 0.5,
             seed: 42,
@@ -2428,6 +2550,7 @@ mod tests {
         });
         full_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let stream = SpeechStream {
+            timings: None,
             rx: Some(pcm_rx),
             sample_rate: 24000,
             failed: false,
@@ -2455,6 +2578,7 @@ mod tests {
         });
         let other = std::thread::spawn(|| {});
         let mut stream = SpeechStream {
+            timings: None,
             rx: Some(rx),
             sample_rate: 24000,
             failed: false,

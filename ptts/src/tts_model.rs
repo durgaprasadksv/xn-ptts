@@ -46,6 +46,16 @@ pub struct VoiceConfig {
     pub prefix: String,
 }
 
+/// One attention head, as `timestamp_heads` names it.
+///
+/// A query-head index: keys and values are shared across a group of query heads, and it is
+/// the query head that attends to a text token.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct TimestampHead {
+    pub layer: usize,
+    pub head: usize,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TTSConfig {
     pub flow_lm: FlowLMConfig,
@@ -68,6 +78,16 @@ pub struct TTSConfig {
     /// Learnt tokens in front of the `speaker_wavs` and `transcript_in_segment` conditionings.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub prefix_sinks: std::collections::BTreeMap<String, PrefixSinkConfig>,
+    /// Which attention heads to read word timestamps from, if this checkpoint has been
+    /// calibrated for them.
+    ///
+    /// Not every head tracks the text position; the ones that do are found per checkpoint by
+    /// searching layers and heads against a reference alignment, so they cannot be guessed
+    /// and do not transfer between checkpoints -- not even between two with the same
+    /// architecture, let alone different head counts. Absent means this checkpoint cannot
+    /// report word timestamps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp_heads: Option<Vec<TimestampHead>>,
     #[serde(default)]
     pub speaker_mimi: Option<SpeakerMimiConfig>,
     #[serde(default)]
