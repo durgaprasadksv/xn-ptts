@@ -123,9 +123,30 @@ pub mod wav;
 
 pub use error::{Error, Result};
 
+/// Each piece of a text and where it came from, from [`Tokenizer::piece_layout`].
+pub struct PieceLayout {
+    /// The pieces, as the tokenizer spells them.
+    pub pieces: Vec<String>,
+    /// Byte offsets into the text each piece covers, one per piece.
+    pub spans: Vec<(usize, usize)>,
+}
+
 pub trait Tokenizer {
     fn encode(&self, text: &str) -> xn::Result<Vec<u32>>;
     fn decode(&self, tokens: &[u32]) -> xn::Result<String>;
+
+    /// Where each piece of `text` came from, as byte offsets into `text`.
+    ///
+    /// Word timestamps need to know which word a piece belongs to, and only the tokenizer
+    /// knows: splitting on the metaspace marker gets contractions wrong, because "isn't" is
+    /// one word spelled as several pieces with punctuation inside.
+    ///
+    /// Defaulted, so a tokenizer that cannot report offsets -- and every existing
+    /// implementor -- is unaffected. Word timestamps are then simply unavailable with it.
+    fn piece_layout(&self, text: &str) -> xn::Result<PieceLayout> {
+        let _ = text;
+        Err(xn::Error::msg("this tokenizer does not report piece offsets"))
+    }
 }
 
 #[cfg(test)]
