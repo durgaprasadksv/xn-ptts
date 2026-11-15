@@ -23,6 +23,20 @@ pub fn remap_key(name: &str) -> Option<String> {
 
     let mut name = name.to_string();
 
+    // pocket-tts calls the learnt token it puts before the voice conditioning
+    // `bos_before_voice` (`insert_bos_before_voice` in its config); audiocraft calls the same
+    // thing the `speaker_wavs` prefix sink. They are one tensor in one position: pocket's
+    // `cat([bos_before_voice, prompt])` is this runtime's
+    // `cat([empty_text, sink.token(..), audio_conditioning])`. So it is a spelling difference,
+    // not a feature gap, and the name is mapped rather than the behaviour reimplemented.
+    //
+    // Getting this wrong is quiet: silence the unused-tensor check instead of mapping the name
+    // and the voice conditioning sits one position out of place, which renders garbled audio
+    // rather than failing.
+    if name == "flow_lm.bos_before_voice" {
+        return Some("flow_lm.condition_provider.conditioners.speaker_wavs.sink".to_string());
+    }
+
     // Order matters: more specific replacements first.
     name = name.replace(
         "flow_lm.condition_provider.conditioners.speaker_wavs.output_proj.weight",
