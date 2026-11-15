@@ -108,6 +108,16 @@ impl Engine {
         self.phonon.set_voice(load_voice(&self.dir, name)?)
     }
 
+    /// Register one voice file under `name`, so [`Self::set_voice`] will take it.
+    ///
+    /// Nothing to do here: this engine already loads a voice by name on demand through
+    /// `load_voice`, out of the bundle's own folder, so every voice beside the bundle is
+    /// available without being registered first. The call exists so the C interface is the same
+    /// shape on both engines, and succeeds when `name` is one this bundle has.
+    pub fn add_voice(&mut self, name: &str, _path: &Path) -> Result<(), String> {
+        load_voice(&self.dir, name).map(|_| ())
+    }
+
     /// Normalize text as `lang` from the next utterance on.
     pub fn set_language(&mut self, lang: &str) -> Result<(), String> {
         self.normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;

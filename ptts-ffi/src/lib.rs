@@ -193,6 +193,40 @@ pub unsafe extern "C" fn ptts_set_voice(h: *mut PttsHandle, name: *const c_char)
     }
 }
 
+/// Register the voice in `path` under `name`, so `ptts_set_voice` will take it and
+/// `ptts_voices` lists it. Returns false on failure; see `ptts_last_error`.
+///
+/// `ptts_new` already loads everything in the checkpoint's `voices/`, which is what a checkpoint
+/// with a few voices wants. This is for one with a catalogue of them: a caller that knows which
+/// voice the reader chose can load that one — about 256KB — instead of holding all of them
+/// resident to speak in one. Calling it for a voice already registered succeeds and reloads
+/// nothing.
+///
+/// # Safety
+/// `h` must come from `ptts_new`; `name` and `path` must be NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ptts_add_voice(
+    h: *mut PttsHandle,
+    name: *const c_char,
+    path: *const c_char,
+) -> bool {
+    let h = unsafe { &mut *h };
+    let name = unsafe { CStr::from_ptr(name) }.to_string_lossy().to_string();
+    let path = unsafe { CStr::from_ptr(path) }.to_string_lossy().to_string();
+    let r = guarded(|| h.engine.add_voice(&name, std::path::Path::new(&path)));
+    match r {
+        Ok(()) => {
+            // The blob is what `ptts_voices` hands out, so it has to grow with the list.
+            h.voice_blob = nul_separated(h.engine.voices());
+            true
+        }
+        Err(e) => {
+            h.last_error = Some(c_string(&e));
+            false
+        }
+    }
+}
+
 /// Normalize text as `lang` (a code `ptts_new` takes, or `none`) from the next `ptts_speak`
 /// on, as `ptts_new` does: switching languages needs no reload. Returns false on failure; see
 /// `ptts_last_error`.

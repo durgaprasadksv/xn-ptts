@@ -37,6 +37,10 @@ bool ptts_speak(PttsHandle *h, const char *text, PttsFrameFn cb, void *user, Ptt
 /// NUL-separated voice names, ending in a second NUL. Borrowed.
 const char *ptts_voices(const PttsHandle *h);
 bool ptts_set_voice(PttsHandle *h, const char *name);
+/// Register the voice file at `path` under `name`, for checkpoints with more voices than are worth
+/// holding resident: ptts_new loads all of voices/, this loads one (~256KB) when it is chosen.
+/// Already-registered names succeed and reload nothing.
+bool ptts_add_voice(PttsHandle *h, const char *name, const char *path);
 /// Normalize text as `lang` (a code ptts_new takes, or none) from the next ptts_speak on, with no reload.
 bool ptts_set_language(PttsHandle *h, const char *lang);
 /// The languages the model was trained for, NUL-separated like ptts_voices. Borrowed.

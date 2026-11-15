@@ -82,6 +82,21 @@ impl Engine {
         Ok(())
     }
 
+    /// Register one voice file under `name`, so [`Self::set_voice`] will take it.
+    ///
+    /// Everything in the checkpoint's `voices/` is loaded by `open`, which is the right default
+    /// for a handful of voices and the wrong one for a catalogue: a checkpoint serving 189 of
+    /// them would hold every embedding resident to speak in one. This loads the one that is
+    /// wanted, when it is wanted, at roughly 256KB each.
+    pub fn add_voice(&mut self, name: &str, path: &Path) -> Result<(), String> {
+        if self.voices.iter().any(|v| v == name) {
+            return Ok(()); // Idempotent: re-selecting a voice must not reload it.
+        }
+        self.synth.add_voice_file(name, path).map_err(|e| e.to_string())?;
+        self.voices.push(name.to_string());
+        Ok(())
+    }
+
     /// Normalize text as `lang` from the next utterance on.
     pub fn set_language(&mut self, lang: &str) -> Result<(), String> {
         self.normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
