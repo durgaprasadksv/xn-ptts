@@ -402,10 +402,12 @@ mod tests {
 
     #[test]
     fn fit_cuts_after_the_middle_comma_without_a_full_stop() {
+        // The cut lands on the comma, and the piece is then closed off with a stop rather than
+        // handed to the model ending mid-clause — see `ensure_terminal_punctuation`.
         let chunks = fit_text("one two three four five, six seven eight nine ten eleven twelve", 8);
         assert_eq!(
             prompts(&chunks),
-            ["One two three four five,", "Six seven eight nine ten eleven twelve."]
+            ["One two three four five.", "Six seven eight nine ten eleven twelve."]
         );
     }
 
@@ -420,7 +422,8 @@ mod tests {
         let text = "one two three four \"five,\" six seven eight nine ten eleven twelve";
         assert_eq!(
             prompts(&fit_text(text, 8)),
-            ["One two three four \"five,\"", "Six seven eight nine ten eleven twelve."]
+            // The stop replaces the comma and stays inside the quotes, where it belongs.
+            ["One two three four \"five.\"", "Six seven eight nine ten eleven twelve."]
         );
     }
 

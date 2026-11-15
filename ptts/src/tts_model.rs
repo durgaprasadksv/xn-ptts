@@ -634,15 +634,51 @@ pub fn prepare_text_prompt(text: &str) -> (String, usize) {
     if let Some(first) = chars.next() {
         text = first.to_uppercase().to_string() + chars.as_str();
     }
-    if let Some(last) = text.chars().last().filter(|c| c.is_alphanumeric()) {
-        let stop = full_stop(last);
-        // Text spaced one character at a time, as Japanese is, keeps its `。` spaced too.
-        if stop == '。' && text.chars().rev().nth(1) == Some(' ') {
-            text.push(' ');
-        }
-        text.push(stop);
+    (ensure_terminal_punctuation(text), frames_after_eos)
+}
+
+/// Sentence-final marks, across the scripts [`full_stop`] can produce.
+const TERMINAL_PUNCTUATION: &str = ".!?\u{2026}\u{3002}\u{964}";
+/// Marks that join clauses instead of ending a sentence.
+const WEAK_PUNCTUATION: &str = ",;:-\u{2013}\u{2014}";
+/// Marks that may follow the sentence-final one.
+const CLOSERS: &str = "\"'\u{201d}\u{2019})]\u{bb}\u{300d}";
+
+/// Make the prompt end on sentence-final punctuation.
+///
+/// These models are trained on sentences that end with one, and without it the last word is
+/// often mispronounced or repeated — so a prompt that ends mid-clause has to be closed off.
+/// Text already ending in a terminal mark, possibly behind closing quotes or brackets, is left
+/// alone; a trailing comma, semicolon, colon or dash is REPLACED by a stop; anything else gets
+/// one appended, ahead of the closers.
+///
+/// This follows `pocket_tts/models/text_chunking.py` (`append_terminal_punctuation`), which is
+/// how the checkpoints' own frontend drives them. The rule it replaces appended a stop only
+/// after a letter or a digit, so a chunk ending `…a mile and a half,` or `…she wanted:` or
+/// `…to the garden,"` kept its comma — and a sentence splitter feeding prose produces those
+/// constantly.
+fn ensure_terminal_punctuation(text: String) -> String {
+    let core = text.trim_end_matches(|c: char| CLOSERS.contains(c) || c == ' ');
+    let closers = text[core.len()..].trim().to_string();
+    let Some(last) = core.chars().last() else { return text };
+    if TERMINAL_PUNCTUATION.contains(last) {
+        return text;
     }
-    (text, frames_after_eos)
+    // The script of the last LETTER, not of the punctuation, picks the stop.
+    let script = core.chars().rev().find(|c| c.is_alphanumeric()).unwrap_or(last);
+    let stop = full_stop(script);
+    let mut out = if WEAK_PUNCTUATION.contains(last) {
+        core.trim_end_matches(|c: char| WEAK_PUNCTUATION.contains(c) || c == ' ').to_string()
+    } else {
+        core.to_string()
+    };
+    // Text spaced one character at a time, as Japanese is, keeps its `。` spaced too.
+    if stop == '\u{3002}' && out.chars().last() != Some(' ') && out.contains(' ') {
+        out.push(' ');
+    }
+    out.push(stop);
+    out.push_str(&closers);
+    out
 }
 
 #[cfg(test)]
@@ -665,8 +701,19 @@ mod tests {
         let cases: &[(&str, &str, usize)] = &[
             ("", "", 3),
             ("  \n ", "", 3),
-            // Only a trailing letter or digit gets a full stop; other punctuation is kept.
+            // A terminal mark is kept; weak punctuation is replaced by a stop; anything else
+            // gains one. See `ensure_terminal_punctuation`.
             ("is it?", "Is it?", 3),
+            ("a mile and a half,", "A mile and a half.", 1),
+            ("three things she wanted:", "Three things she wanted.", 3),
+            ("he went in \u{2014}", "He went in.", 3),
+            // Closers are read past, and the stop lands ahead of them.
+            // Capitalisation only ever touches the FIRST character, so a leading quote shields
+            // the word behind it. The reference frontend behaves the same way.
+            ("\u{201c}to the garden,\u{201d}", "\u{201c}to the garden.\u{201d}", 3),
+            ("she said\u{201d}", "She said.\u{201d}", 3),
+            ("he said.\u{201d}", "He said.\u{201d}", 3),
+            ("it trailed off\u{2026}", "It trailed off\u{2026}", 3),
             ("hello world!", "Hello world!", 3),
             ("call me at 5", "Call me at 5.", 3),
             // Line breaks, CRLF included, and runs of spaces become one space.
