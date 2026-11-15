@@ -657,6 +657,21 @@ const CLOSERS: &str = "\"'\u{201d}\u{2019})]\u{bb}\u{300d}";
 /// after a letter or a digit, so a chunk ending `…a mile and a half,` or `…she wanted:` or
 /// `…to the garden,"` kept its comma — and a sentence splitter feeding prose produces those
 /// constantly.
+///
+/// **Unconditional on purpose.** The reference reads this from the checkpoint's own text
+/// options, and so could this — the shape would be `prepare_text_prompt(text, &TextOptions)`
+/// threaded through `plan`'s helpers, as `pocket-tts/rust/src/text.rs` does. It is hardcoded
+/// instead because every checkpoint we serve asks for the same thing (our 40M's
+/// `pocket_text.json`: `append_terminal_punctuation: true`, `capitalize_first_letter: true`,
+/// `remove_semicolons: false`, `pad_with_spaces_for_short_inputs: false`), and because
+/// threading an argument through `Chunk::new`, `plan::{chunks,fit,fit_with_word_limit,
+/// fit_or_error}` and `split_into_best_sentences` would put this patch in the signatures
+/// upstream edits most — a rebase conflict every release, to express a choice nothing
+/// currently disagrees about.
+///
+/// So the config is documentation here, not control. The day a checkpoint wants the old rule,
+/// thread the options rather than branching on the model: the conversion is mechanical, and
+/// guessing the family from `model_id` is what it exists to avoid.
 fn ensure_terminal_punctuation(text: String) -> String {
     let core = text.trim_end_matches(|c: char| CLOSERS.contains(c) || c == ' ');
     let closers = text[core.len()..].trim().to_string();
