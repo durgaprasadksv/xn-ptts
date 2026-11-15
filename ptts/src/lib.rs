@@ -110,6 +110,8 @@ mod step_graph;
 pub mod s2s;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod synth;
+/// Word-level timestamps from the attention `attn_capture` records.
+pub mod timestamps;
 #[cfg(feature = "hf")]
 pub mod tok;
 pub mod transformer;
