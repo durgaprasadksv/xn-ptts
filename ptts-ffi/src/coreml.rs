@@ -124,6 +124,21 @@ impl Engine {
         Ok(())
     }
 
+    /// Refused on this engine: word timings are read from the flow LM's text attention as it
+    /// steps, and the Core ML driver runs a pre-exported graph that has no such output.
+    /// Turning them off always succeeds, so a caller that asks for none works on both engines.
+    pub fn set_timings(&mut self, on: bool) -> Result<(), String> {
+        if on {
+            return Err("word timings are not available on the Core ML engine".into());
+        }
+        Ok(())
+    }
+
+    /// Always `None`: see [`Self::set_timings`].
+    pub fn word_timings(&self) -> Option<&std::ffi::CString> {
+        None
+    }
+
     /// Sample at `temperature`, already checked, from the next utterance on.
     pub fn set_temperature(&mut self, temperature: f32) {
         self.phonon.set_temperature(temperature);

@@ -16,6 +16,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 # same prompt the other frontends do.
 ptts = { workspace = true, features = ["hf"] }
 serde_json = { workspace = true }
+# Only to say, once, that a checkpoint cannot report word timings. A host with no subscriber
+# installed drops it, which is the right cost for a line that is purely diagnostic.
+tracing = { workspace = true }
 
 [target.'cfg(target_vendor = "apple")'.dependencies]
 ptts-coreml = { path = "../ptts-coreml" }

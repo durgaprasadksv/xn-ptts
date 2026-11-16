@@ -9,6 +9,7 @@ use crate::{PTTS_UNIT_CPU, PttsResult};
 use ptts::checkpoint::read_config;
 use ptts::preprocess::Normalize;
 use ptts::synth::{DeviceKind, Quant, SpeechOptions, Synth, SynthBuilder};
+use std::ffi::CString;
 use std::path::Path;
 
 /// Weight files tried in order, with the format each loads as.
@@ -28,6 +29,13 @@ pub struct Engine {
     normalize: Normalize,
     /// Samples per frame, to count frames in what the stream hands back.
     frame_size: usize,
+    /// Whether to report word timings for the next utterance.
+    timings: bool,
+    /// Whether this checkpoint *can*: word timings read specific attention heads, named by
+    /// `timestamp_heads` in its config, and a checkpoint nobody has calibrated has none.
+    can_time: bool,
+    /// The last utterance's word timings as JSON, for `ptts_word_timings` to borrow.
+    last_timings: Option<CString>,
 }
 
 impl Engine {
@@ -47,6 +55,7 @@ impl Engine {
                 ),
             )?;
         let frame_rate = cfg.mimi.frame_rate;
+        let can_time = cfg.timestamp_heads.as_ref().is_some_and(|heads| !heads.is_empty());
         let mut builder = SynthBuilder::new(cfg, weights, Normalize::OFF)
             .tokenizer_file(dir.join("tokenizer.json"))
             .device(DeviceKind::Cpu)
@@ -54,7 +63,11 @@ impl Engine {
         for (name, path) in ptts::loader::checkpoint_voices(dir) {
             builder = builder.add_voice(name, path);
         }
-        let synth = builder.build().map_err(|e| e.to_string())?;
+        let mut synth = builder.build().map_err(|e| e.to_string())?;
+        // `Synth` normalizes internally from here on, instead of this engine doing it and
+        // handing over the result. That is what lets a word timing's offsets address the
+        // caller's own string: see `speak`.
+        synth.set_normalization(normalize);
         let frame_size = (synth.sample_rate() as f64 / frame_rate).round() as usize;
         Ok(Self {
             voices: synth.voices(),
@@ -65,6 +78,9 @@ impl Engine {
             normalize,
             synth,
             frame_size,
+            timings: false,
+            can_time,
+            last_timings: None,
         })
     }
 
@@ -100,7 +116,31 @@ impl Engine {
     /// Normalize text as `lang` from the next utterance on.
     pub fn set_language(&mut self, lang: &str) -> Result<(), String> {
         self.normalize = lang.parse::<Normalize>().map_err(|e| e.to_string())?;
+        // Normalization is read once per request, so the spoken forms change with no reload.
+        self.synth.set_normalization(self.normalize);
         Ok(())
+    }
+
+    /// Report word timings from the next utterance on.
+    ///
+    /// Asking for them on a checkpoint with no calibrated heads is *not* an error: it speaks
+    /// without them. Refusing here would be worse than useless -- a caller that asks for
+    /// timings by default, as the app does, would get an exception instead of audio -- and
+    /// failing later inside `speak` would lose the utterance for the same reason.
+    pub fn set_timings(&mut self, on: bool) -> Result<(), String> {
+        if on && !self.can_time {
+            tracing::warn!(
+                "this checkpoint has no calibrated timestamp_heads, so it will speak without \
+                 word timings"
+            );
+        }
+        self.timings = on;
+        Ok(())
+    }
+
+    /// The last utterance's word timings as JSON, or `None` if none were asked for.
+    pub fn word_timings(&self) -> Option<&CString> {
+        self.last_timings.as_ref()
     }
 
     /// Sample at `temperature`, already checked, from the next utterance on.
@@ -123,13 +163,19 @@ impl Engine {
             voice: self.voice.clone(),
             temperature: self.temperature,
             seed: self.seed,
+            timings: self.timings && self.can_time,
             ..Default::default()
         };
-        let text = self.normalize.apply(text);
-        let stream = self.synth.stream_with(&text, &opts).map_err(|e| e.to_string())?;
+        // The caller's text, not a normalized copy: `Synth` normalizes it itself, and only
+        // the string passed here can be what a timing's offsets are measured against. Pass
+        // the normalized form instead and `$2` reports the span of "2 dollars" -- offsets
+        // that look valid, monotonic and non-empty while pointing at the wrong words.
+        self.last_timings = None;
+        let mut stream = self.synth.stream_with(text, &opts).map_err(|e| e.to_string())?;
         let (mut samples, mut ttfa) = (0, None);
-        // Dropping the stream on an early return stops generation.
-        for pcm in stream {
+        // Dropping the stream on an early return stops generation. Borrowed rather than
+        // consumed, so the timings can be read off it once the audio is done.
+        for pcm in stream.by_ref() {
             let pcm = pcm.map_err(|e| e.to_string())?;
             if pcm.is_empty() {
                 continue;
@@ -139,6 +185,11 @@ impl Engine {
             if !sink(&pcm) {
                 break;
             }
+        }
+        if self.timings && self.can_time {
+            let words = stream.word_timings_in_text();
+            let json = serde_json::to_string(&words).map_err(|e| e.to_string())?;
+            self.last_timings = Some(CString::new(json).map_err(|e| e.to_string())?);
         }
         Ok(PttsResult {
             frames: samples.div_ceil(self.frame_size) as u32,
