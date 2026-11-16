@@ -708,7 +708,7 @@ fn ensure_terminal_punctuation(text: String) -> String {
         core.to_string()
     };
     // Text spaced one character at a time, as Japanese is, keeps its `。` spaced too.
-    if stop == '\u{3002}' && out.chars().last() != Some(' ') && out.contains(' ') {
+    if stop == '\u{3002}' && !out.ends_with(' ') && out.contains(' ') {
         out.push(' ');
     }
     out.push(stop);

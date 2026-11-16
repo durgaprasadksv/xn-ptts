@@ -161,10 +161,10 @@ pub fn units_from_layout(
 pub fn scores_by_unit(frame: &[f32], token_to_unit: &[usize], unit_count: usize) -> Vec<f32> {
     let mut scores = vec![0.0; unit_count];
     for (token, &unit) in token_to_unit.iter().enumerate() {
-        if let Some(v) = frame.get(token) {
-            if unit < scores.len() {
-                scores[unit] += v;
-            }
+        if let Some(v) = frame.get(token)
+            && unit < scores.len()
+        {
+            scores[unit] += v;
         }
     }
     scores
