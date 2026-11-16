@@ -46,6 +46,9 @@ struct State {
     /// One finished frame per entry: attention over the text tokens, averaged
     /// across the configured heads.
     frames: Vec<Vec<f32>>,
+    /// Frames seen per layer, for `PTTS_SCAN_HEADS`. Each layer is visited once
+    /// per generated frame, so a layer's count IS the frame index.
+    scanned: Vec<usize>,
 }
 
 fn state() -> &'static Mutex<State> {
@@ -60,6 +63,7 @@ pub fn configure(config: Config) {
     s.sum.clear();
     s.count = 0;
     s.frames.clear();
+    s.scanned.clear();
 }
 
 pub fn stop() {
@@ -99,7 +103,8 @@ pub fn capture<T: WithDTypeF, B: Backend>(
         let Some(cfg) = s.config.as_ref() else { return Ok(()) };
         let heads: Vec<usize> =
             cfg.heads.iter().filter(|(l, _)| *l == s.layer).map(|(_, h)| *h).collect();
-        if heads.is_empty() {
+        // A scan wants every layer, including those with no configured head.
+        if heads.is_empty() && std::env::var_os("PTTS_SCAN_HEADS").is_none() {
             return Ok(());
         }
         (heads, cfg.text_start, cfg.text_end)
@@ -139,6 +144,30 @@ pub fn capture<T: WithDTypeF, B: Backend>(
         scores.flatten_all()?.to_vec()?.iter().map(|v| v.to_f64().unwrap_or(0.0) as f32).collect();
 
     let mut s = state().lock().unwrap();
+
+    // Head calibration: which head tracks the text is a property of the weights and is not
+    // recorded anywhere, so it has to be measured once per checkpoint. The softmax above was
+    // computed for EVERY head of this layer and all but the configured ones are about to be
+    // dropped, so reading them here costs nothing but the printing. Per head, only the peak
+    // and its position -- that is all the selection metric needs, and it keeps one sentence to
+    // about a thousand lines instead of megabytes of rows.
+    if std::env::var_os("PTTS_SCAN_HEADS").is_some() {
+        let layer = s.layer;
+        if s.scanned.len() <= layer {
+            s.scanned.resize(layer + 1, 0);
+        }
+        let frame = s.scanned[layer];
+        s.scanned[layer] += 1;
+        for head in 0..(flat.len() / text_len) {
+            let row = &flat[head * text_len..(head + 1) * text_len];
+            let (peak, value) = row
+                .iter()
+                .enumerate()
+                .fold((0usize, 0.0f32), |a, (i, &v)| if v > a.1 { (i, v) } else { a });
+            println!("[scan] layer={layer} head={head} frame={frame} peak={peak} value={value:.6}");
+        }
+    }
+
     let total = s.config.as_ref().map(|c| c.heads.len()).unwrap_or(0);
     if s.sum.len() != text_len {
         s.sum = vec![0.0; text_len];

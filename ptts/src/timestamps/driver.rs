@@ -115,8 +115,22 @@ impl Aligner {
             .collect();
         let mut alignment = WordAlignment::new(layout.units.clone());
         let mut ends = Vec::new();
+        let debug = std::env::var_os("PTTS_DEBUG_ALIGN").is_some();
         for (frame, scores) in captured.iter().enumerate() {
             let scores = super::scores_by_unit(scores, &layout.token_to_unit, unit_count);
+            if debug {
+                // Which unit this frame attends to most, and how sharply. A head that tracks
+                // the text walks the peak forward monotonically and keeps it concentrated;
+                // that is what makes a head worth calibrating, and it is readable here
+                // without a reference alignment.
+                let (peak, score) = scores
+                    .iter()
+                    .enumerate()
+                    .fold((0usize, 0.0f32), |a, (i, &v)| if v > a.1 { (i, v) } else { a });
+                eprintln!(
+                    "[frame] chunk={index} frame={frame} peak={peak} score={score:.4} units={unit_count}"
+                );
+            }
             // Every frame counts as voiced: see this module's header.
             for event in alignment.process_frame(&scores, true, frame as f64 * self.frame_s) {
                 if let WordEvent::End(end) = event {
