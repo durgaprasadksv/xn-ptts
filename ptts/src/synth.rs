@@ -608,6 +608,10 @@ impl<Q: BackendQ> SynthApi for SynthOf<Q> {
         self.normalize
     }
 
+    fn set_normalization(&mut self, normalize: Normalize) {
+        self.normalize = normalize;
+    }
+
     fn device_name(&self) -> String {
         self.model.device().name()
     }
@@ -821,6 +825,10 @@ impl<Q: BackendQ> SynthApi for SynthOf<Q> {
             self.normalize,
             Some(plan::MAX_FIT_TOKENS),
         )?;
+        // Built here, while the caller's text is still in scope and before `chunks` moves.
+        let origins = settings
+            .timings
+            .then(|| Arc::new(crate::origin_map::OriginMap::new(text, &chunks)));
         // A one-shot call is a session sized to this text and dropped afterwards,
         // so there is one generation path rather than two. The voice prompt gets its
         // real length, as the session's own check counts it, and never less than
@@ -829,9 +837,12 @@ impl<Q: BackendQ> SynthApi for SynthOf<Q> {
             Some((_, voice)) => voice.emb.dim(1usize)?,
             None => 0,
         };
-        let text = chunks.iter().map(|c| c.tokens.len() + c.frame_budget).max().unwrap_or(0);
-        let seq_budget = text + prompt.max(plan::PROMPT_SEQ_HEADROOM);
-        self.session_at(&settings, seq_budget)?.stream_chunks(chunks, rng)
+        // Named apart from the `text` above, which is still needed for the mapping.
+        let longest = chunks.iter().map(|c| c.tokens.len() + c.frame_budget).max().unwrap_or(0);
+        let seq_budget = longest + prompt.max(plan::PROMPT_SEQ_HEADROOM);
+        let mut stream = self.session_at(&settings, seq_budget)?.stream_chunks(chunks, rng)?;
+        stream.origins = origins;
+        Ok(stream)
     }
 
     fn quant(&self) -> Quant {
@@ -952,7 +963,12 @@ impl<Q: BackendQ> SessionOf<Q> {
             self.normalize,
             fit_to,
         )?;
-        self.stream_chunks(chunks, rng)
+        let origins = self
+            .timings
+            .then(|| Arc::new(crate::origin_map::OriginMap::new(text, &chunks)));
+        let mut stream = self.stream_chunks(chunks, rng)?;
+        stream.origins = origins;
+        Ok(stream)
     }
 
     /// Start the two worker threads for an already-planned set of chunks.
@@ -1193,6 +1209,8 @@ impl<Q: BackendQ> SessionOf<Q> {
 
         Ok(SpeechStream {
             timings: aligner,
+            // Set by the callers that hold the caller's text; `stream_chunks` has only chunks.
+            origins: None,
             rx: Some(pcm_rx),
             sample_rate: self.sample_rate(),
             failed: false,
@@ -1540,6 +1558,21 @@ fn run_inline<Q: BackendQ>(
 /// Leaving the stream unread pauses generation once they fill; consuming audio
 /// lets it resume. Iteration and cleanup block, including waiting for the current
 /// model operation on cancellation or error. Use a blocking thread in async code.
+/// A word timing in the terms of the text the caller passed.
+///
+/// `start` and `end` are Unicode scalar offsets into that text, *before* normalization, so
+/// `text.chars().skip(start).take(end - start)` is `word` -- `$2` is still the caller's `$2`
+/// though it is read as "2 dollars". `from` and `to` are seconds from the start of the
+/// utterance's audio.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct TextWord {
+    pub word: String,
+    pub start: usize,
+    pub end: usize,
+    pub from: f64,
+    pub to: f64,
+}
+
 pub struct SpeechStream {
     /// `Option` so [`Drop`] can release it before joining: closing this receiver
     /// wakes a decoder blocked on output, which closes the latent receiver
@@ -1555,6 +1588,10 @@ pub struct SpeechStream {
     /// Shared with the generating thread, which appends each chunk's words as that chunk
     /// finishes. `None` when timings were not asked for.
     timings: Option<Arc<std::sync::Mutex<crate::timestamps::Aligner>>>,
+    /// Maps each chunk's prepared prompt back onto the text this generation was given, so a
+    /// timing can be addressed against the caller's own string. `None` when timings were not
+    /// asked for, and built on the calling thread because it needs that text.
+    origins: Option<Arc<crate::origin_map::OriginMap>>,
 }
 
 impl SpeechStream {
@@ -1576,6 +1613,35 @@ impl SpeechStream {
                 .words()
                 .to_vec(),
         }
+    }
+
+    /// The words aligned so far, addressed against the text this generation was given
+    /// rather than against the prompt the model was fed.
+    ///
+    /// Empty when timings were not requested. A word whose span maps to no original word is
+    /// dropped rather than guessed at: these offsets are what a caller indexes its own string
+    /// with, and a wrong one highlights a word the voice never said.
+    pub fn word_timings_in_text(&self) -> Vec<TextWord> {
+        let (Some(origins), Some(aligner)) = (self.origins.as_ref(), self.timings.as_ref())
+        else {
+            return Vec::new();
+        };
+        let aligner = aligner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        aligner
+            .words()
+            .iter()
+            .zip(aligner.word_chunks())
+            .filter_map(|(timed, &chunk)| {
+                let (start, end, word) = origins.span_of(chunk, timed.begin, timed.end)?;
+                Some(TextWord {
+                    word: word.to_string(),
+                    start,
+                    end,
+                    from: timed.word.start,
+                    to: timed.word.end,
+                })
+            })
+            .collect()
     }
 
     fn join_workers(&mut self) -> bool {
@@ -2081,6 +2147,14 @@ pub trait SynthApi: sealed::Sealed + Send + Sync {
     /// themselves, and want [`Normalize::apply`] first.
     fn normalization(&self) -> Normalize;
 
+    /// Normalize later requests as `normalize` instead.
+    ///
+    /// Normalization is pure text preprocessing, read once per request, so the language of the
+    /// spoken forms changes with no reload. It also decides the text that word timings are
+    /// reported against: every text-taking method here normalizes internally, so a caller that
+    /// normalizes first instead gets offsets into its own normalized string.
+    fn set_normalization(&mut self, normalize: Normalize);
+
     /// Name of the device the model is running on, e.g. `"cpu"` or `"cuda:0"`.
     fn device_name(&self) -> String;
 
@@ -2551,6 +2625,7 @@ mod tests {
         full_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let stream = SpeechStream {
             timings: None,
+            origins: None,
             rx: Some(pcm_rx),
             sample_rate: 24000,
             failed: false,
@@ -2579,6 +2654,7 @@ mod tests {
         let other = std::thread::spawn(|| {});
         let mut stream = SpeechStream {
             timings: None,
+            origins: None,
             rx: Some(rx),
             sample_rate: 24000,
             failed: false,

@@ -253,7 +253,9 @@ fn main() -> Result<()> {
         first_chunk_ms.get_or_insert_with(|| start.elapsed().as_secs_f64() * 1000.0);
     }
     if let Some(path) = args.timings.as_ref() {
-        let words = stream.word_timings();
+        // Addressed against the text on the command line, not against the prompt the model
+        // was fed, so the offsets index the string a caller actually holds.
+        let words = stream.word_timings_in_text();
         std::fs::write(path, serde_json::to_string_pretty(&words)?)?;
         tracing::info!(words = words.len(), path = %path.display(), "wrote word timings");
     }

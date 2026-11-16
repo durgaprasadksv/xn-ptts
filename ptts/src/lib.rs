@@ -93,6 +93,8 @@ mod layer_scale;
 pub mod loader;
 pub mod mimi;
 mod mlp;
+/// Carrying a word timing back onto the text the caller passed, before normalization.
+pub mod origin_map;
 pub mod plan;
 pub mod preprocess;
 mod q8;

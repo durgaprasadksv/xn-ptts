@@ -58,6 +58,13 @@ pub struct Aligner {
     frame_s: f64,
     layouts: Vec<ChunkLayout>,
     words: Vec<TimedWord>,
+    /// Which chunk each entry of `words` came from, parallel to it.
+    ///
+    /// A [`TimedWord`]'s span is bytes into *its own chunk's* prepared prompt, so the span is
+    /// meaningless without knowing the chunk. The reference never needs this -- it reports
+    /// spans into the prompt and stops there -- so the chunk is recorded here rather than
+    /// added to the ported record.
+    word_chunks: Vec<usize>,
     /// Carried across chunks so a caller sees one stream: words numbered from the start of
     /// the input, and times measured from its first sample.
     word_offset: usize,
@@ -77,6 +84,7 @@ impl Aligner {
             frame_s: 1.0 / frame_rate,
             layouts,
             words: Vec::new(),
+            word_chunks: Vec::new(),
             word_offset: 0,
             frames_before: 0,
         }
@@ -146,6 +154,7 @@ impl Aligner {
             word.end += time_offset;
             TimedWord { word, begin, end }
         }));
+        self.word_chunks.resize(self.words.len(), index);
         self.word_offset += layout.words;
         self.frames_before += captured.len();
     }
@@ -156,7 +165,13 @@ impl Aligner {
     }
 
     pub fn take_words(&mut self) -> Vec<TimedWord> {
+        self.word_chunks.clear();
         std::mem::take(&mut self.words)
+    }
+
+    /// The chunk each word of [`Self::words`] came from, parallel to it.
+    pub fn word_chunks(&self) -> &[usize] {
+        &self.word_chunks
     }
 }
 
